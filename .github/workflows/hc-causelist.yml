@@ -1,0 +1,58 @@
+name: HC causelist (daily, automatic)
+# Reads the Rajasthan High Court "Quick Download" causelists of Jaipur and Jodhpur into data
+# for the Case Desk "Today" section (today in the mornings, tomorrow too in the evening). Runs around 7:00 AM
+# India time (and again later in the morning and the evening, in case lists come out late),
+# or by hand: Actions -> "HC causelist (daily, automatic)" -> Run workflow.
+# The data goes to the branch "hc-data" of this public repository (one commit, replaced each time,
+# so it never grows); the Desk reads it through its own /api/hc/data/. The court's lists are public.
+on:
+  schedule:
+    - cron: "25 1 * * *"   # 06:55 IST
+    - cron: "55 1 * * *"   # 07:25 IST
+    - cron: "40 2 * * *"   # 08:10 IST
+    - cron: "40 4 * * *"   # 10:10 IST (supplementary lists)
+    - cron: "30 13 * * *"  # 19:00 IST (next day's lists)
+  push:
+    paths: ["scripts/hc_*.py", ".github/workflows/hc-causelist.yml"]
+  workflow_dispatch:
+    inputs:
+      days_ahead:
+        description: "How many days ahead to read (0 = today only)"
+        default: "1"
+permissions:
+  contents: write
+concurrency:
+  group: hc-causelist
+  cancel-in-progress: false
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pdfplumber==0.11.4
+      - name: Last run's data (so unchanged lists are not read again)
+        run: |
+          mkdir -p out
+          if git fetch --depth 1 origin hc-data 2>/dev/null; then
+            git --work-tree=out checkout FETCH_HEAD -- site 2>/dev/null || true
+          fi
+          mkdir -p out/site
+          ls out/site/hc 2>/dev/null || true
+      - name: Read the causelists
+        # mornings: today's lists; the 7 PM run: tomorrow's too; by hand: as asked
+        run: python scripts/hc_fetch.py out/site "${{ github.event.inputs.days_ahead || (github.event.schedule == '30 13 * * *' && '1') || (github.event_name == 'schedule' && '0') || '1' }}"
+      - name: Publish to the hc-data branch
+        run: |
+          cd out
+          git init -q -b hc-data
+          git add -A
+          git -c user.name=hc-bot -c user.email=hc-bot commit -qm "HC causelists $(TZ=Asia/Kolkata date '+%d %b %Y %H:%M')"
+          du -sh site/hc; cat site/hc/days.json
+          cd ..
+          # push with the checkout's own credentials: one commit that replaces the branch each time
+          git fetch -q ./out hc-data
+          git push -f origin FETCH_HEAD:refs/heads/hc-data
