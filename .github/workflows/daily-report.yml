@@ -1,0 +1,68 @@
+name: Daily reports and watchdog
+# Morning report (7:45 AM, after the High Court lists are read), evening report (7:30 PM) and a check
+# four times a working day that the website and the causelist data are up. Reports go to Instant (the
+# team chat in the Desk and the app) and, if set, by e-mail.
+# One-time setup (repository Settings -> Secrets and variables -> Actions):
+#   FIREBASE_SERVICE_ACCOUNT  the JSON key of a Firebase service account (Firebase console -> Project settings
+#                             -> Service accounts -> Generate new private key). Needed for reports and backup.
+#   RESEND_API_KEY, REPORT_EMAILS (comma separated)  optional, to also e-mail the reports. With Resend's test
+#                             sender, mail reaches only the Resend account's own address until a domain is
+#                             verified there (then set REPORT_FROM, e.g. "Case Desk <desk@yourdomain>").
+#   REPORT_FROM               optional, see above.
+# Nothing private is printed in these public logs: the reports go to Instant (and e-mail), never to the log.
+on:
+  schedule:
+    - cron: "15 2 * * *"    # 07:45 IST morning report
+    - cron: "0 14 * * *"    # 19:30 IST evening report
+    - cron: "5 3,6,9,12 * * 1-6"   # 08:35, 11:35, 14:35, 17:35 IST, working days: is everything up?
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "morning, evening or check"
+        default: "morning"
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MODE: ${{ github.event.inputs.mode || (github.event.schedule == '15 2 * * *' && 'morning') || (github.event.schedule == '0 14 * * *' && 'evening') || 'check' }}
+    steps:
+      - name: Is everything up?
+        if: env.MODE == 'check'
+        run: |
+          set -e
+          fail=0
+          for u in https://sh-chhaba.pages.dev/casedesk/ https://sh-chhaba.pages.dev/api/hc/data/days.json https://sh-chhaba.pages.dev/api/files/ping; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$u" || echo 000)
+            echo "$code $u"; [ "$code" = "200" ] || fail=1
+          done
+          # after 8:30 AM IST on a working day, today's Jaipur list must have been read
+          h=$(TZ=Asia/Kolkata date +%H%M); dow=$(TZ=Asia/Kolkata date +%u); today=$(TZ=Asia/Kolkata date +%F)
+          if [ "$dow" -le 6 ]; then
+            if ! curl -s --max-time 30 https://sh-chhaba.pages.dev/api/hc/data/days.json | grep -q "$today"; then
+              echo "::warning::Today's High Court causelist has not been read yet ($today)."
+              # only a working day with lists out counts as a failure
+              curl -s --max-time 30 "https://sh-chhaba.pages.dev/api/hc/lists?b=jp&d=$today" | grep -q '"lists"' && fail=1
+            fi
+          fi
+          # a failed run e-mails the repository owner (GitHub's own notification)
+          exit $fail
+      - uses: actions/checkout@v4
+        if: env.MODE != 'check'
+      - uses: actions/setup-python@v5
+        if: env.MODE != 'check'
+        with:
+          python-version: "3.12"
+      - if: env.MODE != 'check'
+        run: pip install google-auth==2.35.0 requests
+      - name: Report
+        if: env.MODE != 'check'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          REPORT_EMAILS: ${{ secrets.REPORT_EMAILS }}
+          REPORT_FROM: ${{ secrets.REPORT_FROM }}
+          PUBLIC_REPO: "1"
+        run: python scripts/daily_report.py "$MODE"
